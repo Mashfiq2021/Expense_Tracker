@@ -1,0 +1,161 @@
+import streamlit as st
+import pyodbc
+import bcrypt
+from datetime import datetime
+import pandas as pd
+
+# Change Page Title
+st.set_page_config(
+    page_title="Personal Expense Tracker",
+    page_icon="💰",  # Optional: Use an emoji or path to a custom icon
+    layout="centered"  # or "wide" if you want full-width layout
+)
+
+# Connect to MS SQL Server
+#server_name = "8DMCZ23"
+server_name = "XYZ-PC"
+database_name = "ExpenseTracker"
+connection_string = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server_name};DATABASE={database_name};Trusted_Connection=yes;"
+conn = pyodbc.connect(connection_string)
+cursor = conn.cursor()
+
+# Function to create Users table if it doesn't exist
+def create_users_table():
+    cursor.execute("""
+    IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Users' AND xtype='U')
+    CREATE TABLE Users (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        username NVARCHAR(50) UNIQUE NOT NULL,
+        password NVARCHAR(255) NOT NULL
+    );
+    """)
+    conn.commit()
+
+create_users_table()
+
+# Function to register a new user
+def register_user(username, password):
+    try:
+        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        cursor.execute("INSERT INTO Users (username, password) VALUES (?, ?)", (username, hashed_password))
+        conn.commit()
+        return True
+    except:
+        return False
+
+# Function to authenticate user
+def authenticate_user(username, password):
+    cursor.execute("SELECT password FROM Users WHERE username = ?", (username,))
+    result = cursor.fetchone()
+    if result:
+        stored_hashed = result[0]  # already bytes from VARBINARY
+        return bcrypt.checkpw(password.encode('utf-8'), stored_hashed)
+    return False
+
+# Function to create Expenses table if not exists
+def create_expenses_table():
+    cursor.execute("""
+    IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Expenses' AND xtype='U')
+    CREATE TABLE Expenses (
+        id INT IDENTITY(1,1) PRIMARY KEY,
+        date DATE NOT NULL,
+        description NVARCHAR(255) NOT NULL,
+        category NVARCHAR(50) NOT NULL,
+        amount FLOAT NOT NULL,
+        username NVARCHAR(50) NOT NULL
+    );
+    """)
+    conn.commit()
+
+create_expenses_table()
+
+# Function to add an expense call to the stored procedure
+#def add_expense(description, category, amount, username):
+#    date = datetime.now().strftime("%Y-%m-%d")
+#    cursor.execute("INSERT INTO Expenses (date, description, category, amount, username) VALUES (?, ?, ?, ?, ?)",
+#                   (date, description, category, amount, username))
+#    conn.commit()
+def add_expense(description, category, amount, username):
+    date = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("EXEC AddExpense ?, ?, ?, ?, ?", (date, description, category, amount, username))
+    conn.commit()
+
+
+# Function to fetch expenses for the logged-in user - Use pd.read_sql() to get data via the stored procedure
+#def fetch_expenses(username):
+#    query = "SELECT * FROM Expenses WHERE username = ? ORDER BY date DESC, id DESC"
+#    df = pd.read_sql(query, conn, params=[username])
+#    return df
+def fetch_expenses(username):
+    if username == "admin":  # privileged user
+        df = pd.read_sql("EXEC GetAllExpenses", conn)
+    else:
+        df = pd.read_sql("EXEC GetExpensesByUser ?", conn, params=[username])
+    return df
+
+
+# Login Page
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.username = ""
+
+if not st.session_state.logged_in:
+    st.title("Expense Tracker Login")
+    tab1, tab2 = st.tabs(["Login", "Register"])
+    
+    with tab1:
+        st.subheader("Login")
+        login_username = st.text_input("Username")
+        login_password = st.text_input("Password", type="password")
+        if st.button("Login"):
+            if authenticate_user(login_username, login_password):
+                st.session_state.logged_in = True
+                st.session_state.username = login_username
+                st.success("Login successful! Redirecting...")
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
+    
+    with tab2:
+        st.subheader("Register")
+        reg_username = st.text_input("New Username")
+        reg_password = st.text_input("New Password", type="password")
+        if st.button("Register"):
+            if register_user(reg_username, reg_password):
+                st.success("Registration successful! Please log in.")
+            else:
+                st.error("Username already exists. Try another.")
+else:
+    # Expense Tracker Main Page
+    st.title("Personal Expense Tracker")
+    st.write(f"Welcome, {st.session_state.username}!")
+
+    # Logout Button
+    if st.button("Logout"):
+        st.session_state.logged_in = False
+        st.session_state.username = ""
+        st.rerun()
+    
+    # Add Expense Section
+    with st.form("add_expense_form", clear_on_submit=True):
+        st.header("Add New Expense")
+        description = st.text_input("Description")
+        category = st.selectbox("Category", ["Food", "Transport", "Shopping", "Bills", "Other"])
+        amount = st.number_input("Amount", min_value=0.0, format="%.2f")
+        submit = st.form_submit_button("Add Expense")
+    
+        if submit and description and amount > 0:
+            add_expense(description, category, amount, st.session_state.username)
+            st.success("Expense added successfully!")
+            st.rerun()
+    
+    # Show Expenses Section
+    st.header("Your Expenses")
+    expenses = fetch_expenses(st.session_state.username)
+    
+    if not expenses.empty:
+        st.dataframe(expenses)
+    else:
+        st.info("No expenses found.")
+
+   
